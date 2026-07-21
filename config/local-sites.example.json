@@ -1,0 +1,37 @@
+{
+  "_comentario": [
+    "Referencia del formato de sources.config para platform='local_scrape'.",
+    "Este archivo NO se lee en runtime: la config real vive en la columna config (jsonb)",
+    "de la tabla sources. Sirve como plantilla para armar el INSERT de un sitio nuevo.",
+    "",
+    "Convención de selectores: 'selector@atributo' extrae ese atributo del elemento",
+    "(ej. 'a.link@href'); sin @ extrae el texto (ej. '.precio').",
+    "Todos los selectores salvo 'item', 'title' y 'url' son opcionales.",
+    "Los selectores se aplican DENTRO de cada elemento que matchea 'item'."
+  ],
+
+  "list_url": "/ofertas",
+
+  "pagination": {
+    "enabled": true,
+    "param": "page",
+    "start": 1,
+    "max_pages": 3
+  },
+
+  "selectors": {
+    "item": ".product-card",
+    "title": ".product-card__title",
+    "price": ".product-card__price",
+    "url": "a.product-card__link@href",
+    "image": "img.product-card__img@src",
+    "description": ".product-card__desc",
+    "category": ".product-card__category"
+  },
+
+  "currency_default": "PYG",
+  "category_default": "general",
+  "location": "Ciudad del Este",
+
+  "_ejemplo_insert": "INSERT INTO sources (name, platform, base_url, config, active) VALUES ('mi-tienda-cde', 'local_scrape', 'https://mitienda.com.py', '<este json>'::jsonb, true);"
+}

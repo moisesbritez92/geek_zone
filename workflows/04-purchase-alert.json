@@ -1,0 +1,152 @@
+{
+  "name": "04 - Alerta de Compra (sub-workflow)",
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            { "name": "phone_number", "type": "string" },
+            { "name": "conversation_id", "type": "string" },
+            { "name": "customer_name", "type": "string" },
+            { "name": "product_id", "type": "number" },
+            { "name": "product_name", "type": "string" },
+            { "name": "product_price", "type": "number" },
+            { "name": "currency", "type": "string" },
+            { "name": "notes", "type": "string" }
+          ]
+        }
+      },
+      "id": "d4000000-0000-4000-8000-000000000001",
+      "name": "Cuando el agente registra una compra",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [-680, 300],
+      "notes": "Lo invoca la tool register_purchase_alert del workflow 01. phone_number y conversation_id vienen del contexto real, no del LLM."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO purchase_alerts (\n  conversation_id, phone_number, customer_name, product_id,\n  product_name_snapshot, price_snapshot, currency_snapshot, notes, status\n)\nVALUES (\n  NULLIF($1, '')::uuid, $2, NULLIF($3, ''), $4,\n  $5, $6, COALESCE(NULLIF($7, ''), 'PYG'), $8, 'pending'\n)\nRETURNING id AS alert_id, created_at;",
+        "options": {
+          "queryReplacement": "={{ [ $json.conversation_id || '', $json.phone_number, $json.customer_name || '', $json.product_id || null, $json.product_name || null, $json.product_price || null, $json.currency || '', $json.notes || null ] }}"
+        }
+      },
+      "id": "d4000000-0000-4000-8000-000000000002",
+      "name": "Insert Purchase Alert",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [-460, 300],
+      "credentials": {
+        "postgres": { "id": "REEMPLAZAR", "name": "Postgres - geek_zone" }
+      },
+      "notes": "product_id puede venir null: si el cliente compra algo que no está en el catálogo igual queremos la alerta. El snapshot de nombre/precio conserva el dato aunque el producto desaparezca del scraping."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a-msg",
+              "name": "adminMessage",
+              "value": "=🛒 NUEVA COMPRA #{{ $json.alert_id }}\n\nCliente: {{ $('Cuando el agente registra una compra').item.json.customer_name || 'sin nombre' }}\nWhatsApp: +{{ $('Cuando el agente registra una compra').item.json.phone_number }}\n\nProducto: {{ $('Cuando el agente registra una compra').item.json.product_name || 'no especificado' }}\nPrecio: {{ $('Cuando el agente registra una compra').item.json.product_price ? (($('Cuando el agente registra una compra').item.json.currency || 'PYG') === 'PYG' ? 'Gs. ' + Number($('Cuando el agente registra una compra').item.json.product_price).toLocaleString('es-PY') : 'USD ' + $('Cuando el agente registra una compra').item.json.product_price) : 'a confirmar' }}\n\nNotas: {{ $('Cuando el agente registra una compra').item.json.notes || '-' }}\n\nContactar al cliente para coordinar pago y entrega.",
+              "type": "string"
+            },
+            { "id": "a-id", "name": "alert_id", "value": "={{ $json.alert_id }}", "type": "number" }
+          ]
+        },
+        "includeOtherFields": false,
+        "options": {}
+      },
+      "id": "d4000000-0000-4000-8000-000000000003",
+      "name": "Armar Mensaje Admin",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-240, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.EVOLUTION_BASE_URL }}/message/sendText/{{ $env.EVOLUTION_INSTANCE_NAME }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ number: $env.ADMIN_WHATSAPP_NUMBER, text: $json.adminMessage }) }}",
+        "onError": "continueRegularOutput",
+        "options": {}
+      },
+      "id": "d4000000-0000-4000-8000-000000000004",
+      "name": "Notificar Admin por WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-20, 300],
+      "credentials": {
+        "httpHeaderAuth": { "id": "REEMPLAZAR", "name": "Evolution API - Header Auth" }
+      },
+      "notes": "onError=continue a propósito: si falla el aviso al admin, la alerta YA quedó en la base. Nunca perdemos la venta por un problema de red."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE purchase_alerts SET notified_admin = true WHERE id = $1;",
+        "options": {
+          "queryReplacement": "={{ [$('Armar Mensaje Admin').item.json.alert_id] }}"
+        }
+      },
+      "id": "d4000000-0000-4000-8000-000000000005",
+      "name": "Marcar Admin Notificado",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [200, 300],
+      "credentials": {
+        "postgres": { "id": "REEMPLAZAR", "name": "Postgres - geek_zone" }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "r-status", "name": "status", "value": "ok", "type": "string" },
+            { "id": "r-id", "name": "alert_id", "value": "={{ $('Armar Mensaje Admin').item.json.alert_id }}", "type": "number" },
+            {
+              "id": "r-msg",
+              "name": "message",
+              "value": "Compra registrada. Un asesor va a contactar al cliente para coordinar el pago y la entrega.",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": false,
+        "options": {}
+      },
+      "id": "d4000000-0000-4000-8000-000000000006",
+      "name": "Respuesta al Agente",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [420, 300],
+      "notes": "Esto es lo que ve el LLM como resultado de la tool."
+    }
+  ],
+  "connections": {
+    "Cuando el agente registra una compra": {
+      "main": [[{ "node": "Insert Purchase Alert", "type": "main", "index": 0 }]]
+    },
+    "Insert Purchase Alert": {
+      "main": [[{ "node": "Armar Mensaje Admin", "type": "main", "index": 0 }]]
+    },
+    "Armar Mensaje Admin": {
+      "main": [[{ "node": "Notificar Admin por WhatsApp", "type": "main", "index": 0 }]]
+    },
+    "Notificar Admin por WhatsApp": {
+      "main": [[{ "node": "Marcar Admin Notificado", "type": "main", "index": 0 }]]
+    },
+    "Marcar Admin Notificado": {
+      "main": [[{ "node": "Respuesta al Agente", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "pinData": {},
+  "tags": []
+}

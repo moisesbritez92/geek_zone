@@ -1,0 +1,109 @@
+{
+  "name": "03 - Scraping Sitios Locales CDE (orquestador)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "days", "triggerAtHour": 3, "triggerAtMinute": 0 }]
+        }
+      },
+      "id": "c3000000-0000-4000-8000-000000000001",
+      "name": "Todos los dias 03:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-1120, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id AS source_id, name, base_url, config\nFROM sources\nWHERE platform = 'local_scrape' AND active = true;",
+        "options": {}
+      },
+      "id": "c3000000-0000-4000-8000-000000000002",
+      "name": "Get Local Sources",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [-900, 300],
+      "credentials": {
+        "postgres": { "id": "REEMPLAZAR", "name": "Postgres - geek_zone" }
+      },
+      "notes": "Agregar un sitio nuevo = insertar una fila en sources con su config de selectores y active=true. Este workflow relee la tabla en cada corrida."
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "c3000000-0000-4000-8000-000000000003",
+      "name": "Loop Over Sites",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [-680, 300],
+      "notes": "Salida 0 = terminó. Salida 1 = siguiente sitio. De a uno para no golpear varios sitios en paralelo."
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "REEMPLAZAR_ID_DEL_WORKFLOW_03A",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "source_id": "={{ $json.source_id }}",
+            "name": "={{ $json.name }}",
+            "base_url": "={{ $json.base_url }}",
+            "config": "={{ $json.config }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            { "id": "source_id", "displayName": "source_id", "type": "number", "required": false, "defaultMatch": false, "canBeUsedToMatch": true, "removed": false },
+            { "id": "name", "displayName": "name", "type": "string", "required": false, "defaultMatch": false, "canBeUsedToMatch": true, "removed": false },
+            { "id": "base_url", "displayName": "base_url", "type": "string", "required": false, "defaultMatch": false, "canBeUsedToMatch": true, "removed": false },
+            { "id": "config", "displayName": "config", "type": "object", "required": false, "defaultMatch": false, "canBeUsedToMatch": true, "removed": false }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "mode": "each",
+        "options": { "waitForSubWorkflow": true }
+      },
+      "id": "c3000000-0000-4000-8000-000000000004",
+      "name": "Ejecutar Scraper del Sitio",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [-460, 400],
+      "onError": "continueRegularOutput",
+      "notes": "IMPORTANTE: al importar hay que volver a seleccionar el workflow 03a (el ID cambia en cada instancia de n8n).\nonError=continue: si un sitio revienta, el resto igual se scrapea."
+    },
+    {
+      "parameters": {},
+      "id": "c3000000-0000-4000-8000-000000000005",
+      "name": "Fin",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [-460, 180]
+    }
+  ],
+  "connections": {
+    "Todos los dias 03:00": {
+      "main": [[{ "node": "Get Local Sources", "type": "main", "index": 0 }]]
+    },
+    "Get Local Sources": {
+      "main": [[{ "node": "Loop Over Sites", "type": "main", "index": 0 }]]
+    },
+    "Loop Over Sites": {
+      "main": [
+        [{ "node": "Fin", "type": "main", "index": 0 }],
+        [{ "node": "Ejecutar Scraper del Sitio", "type": "main", "index": 0 }]
+      ]
+    },
+    "Ejecutar Scraper del Sitio": {
+      "main": [[{ "node": "Loop Over Sites", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "pinData": {},
+  "tags": []
+}

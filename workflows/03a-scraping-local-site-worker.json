@@ -1,0 +1,183 @@
+{
+  "name": "03a - Scraper Sitio Local (sub-workflow)",
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            { "name": "source_id", "type": "number" },
+            { "name": "name", "type": "string" },
+            { "name": "base_url", "type": "string" },
+            { "name": "config", "type": "object" }
+          ]
+        }
+      },
+      "id": "c3a00000-0000-4000-8000-000000000001",
+      "name": "Cuando el orquestador llama",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [-1120, 300],
+      "notes": "Worker 100% genérico: todo lo específico del sitio viene en config (sources.config). Agregar un sitio nuevo NO requiere tocar este workflow."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Arma la lista de URLs a descargar según la config de paginación del sitio.\nconst src = $json;\nconst cfg = src.config ?? {};\nconst pag = cfg.pagination ?? {};\n\nconst listUrl = new URL(cfg.list_url ?? '/', src.base_url).href;\nconst urls = [];\n\nif (pag.enabled) {\n  const maxPages = Number(pag.max_pages ?? 1);\n  const param = pag.param ?? 'page';\n  const start = Number(pag.start ?? 1);\n  for (let i = 0; i < maxPages; i++) {\n    const u = new URL(listUrl);\n    u.searchParams.set(param, String(start + i));\n    urls.push(u.href);\n  }\n} else {\n  urls.push(listUrl);\n}\n\nreturn { json: { ...src, urls } };"
+      },
+      "id": "c3a00000-0000-4000-8000-000000000002",
+      "name": "Armar URLs de Paginas",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-900, 300]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "urls",
+        "destinationFieldName": "pageUrl",
+        "options": {}
+      },
+      "id": "c3a00000-0000-4000-8000-000000000003",
+      "name": "Split Out URLs",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [-680, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.pageUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
+            },
+            { "name": "Accept-Language", "value": "es-PY,es;q=0.9,pt-BR;q=0.8" }
+          ]
+        },
+        "onError": "continueRegularOutput",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": { "responseFormat": "text", "outputPropertyName": "html" }
+          }
+        }
+      },
+      "id": "c3a00000-0000-4000-8000-000000000004",
+      "name": "Fetch Pagina",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-460, 300],
+      "notes": "onError=continue: si una página cae, las demás igual se procesan."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parseo genérico guiado por los selectores de sources.config.\n// Requiere NODE_FUNCTION_ALLOW_EXTERNAL=cheerio en la instancia de n8n.\nconst cheerio = require('cheerio');\n\nconst src = $('Cuando el orquestador llama').first().json;\nconst cfg = src.config ?? {};\nconst sel = cfg.selectors ?? {};\nconst baseUrl = src.base_url;\nconst defaultCurrency = cfg.currency_default ?? 'PYG';\n\nif (!sel.item) {\n  throw new Error(`La fuente \"${src.name}\" no tiene definido selectors.item en su config.`);\n}\n\n// Convención \"selector@atributo\": con @ extrae el atributo, sin @ extrae el texto.\nfunction pick($, $scope, spec) {\n  if (!spec) return null;\n  const [selector, attr] = spec.split('@');\n  const node = selector ? $scope.find(selector).first() : $scope;\n  if (!node || node.length === 0) return null;\n  const val = attr ? node.attr(attr) : node.text();\n  return val ? val.replace(/\\s+/g, ' ').trim() : null;\n}\n\nfunction toAbsolute(url) {\n  if (!url) return null;\n  try { return new URL(url, baseUrl).href; } catch { return null; }\n}\n\n// \"Gs. 1.250.000\" -> 1250000 PYG | \"USD 1,299.00\" -> 1299.00 USD\nfunction parsePrice(raw) {\n  if (!raw) return { price: null, currency: defaultCurrency };\n\n  const hasGuarani = /(gs|₲|g\\$)/i.test(raw);\n  const hasDollar = /(us\\$|usd|\\$)/i.test(raw);\n  const currency = hasGuarani ? 'PYG' : (hasDollar ? 'USD' : defaultCurrency);\n\n  const digits = raw.replace(/[^0-9.,]/g, '');\n  if (!digits) return { price: null, currency };\n\n  // Si el último separador tiene exactamente 2 dígitos detrás es el decimal;\n  // si no, todos los separadores son de miles (formato PYG: 1.250.000).\n  const lastSep = Math.max(digits.lastIndexOf('.'), digits.lastIndexOf(','));\n  let price;\n  if (lastSep !== -1 && digits.length - lastSep - 1 === 2) {\n    const intPart = digits.slice(0, lastSep).replace(/[.,]/g, '');\n    price = Number(`${intPart || '0'}.${digits.slice(lastSep + 1)}`);\n  } else {\n    price = Number(digits.replace(/[.,]/g, ''));\n  }\n\n  return { price: Number.isFinite(price) ? price : null, currency };\n}\n\nconst out = [];\nconst vistos = new Set();\n\nfor (const item of $input.all()) {\n  const html = item.json.html;\n  if (!html || typeof html !== 'string') continue;\n\n  const $ = cheerio.load(html);\n\n  $(sel.item).each((_, el) => {\n    const $el = $(el);\n\n    const name = pick($, $el, sel.title);\n    const productUrl = toAbsolute(pick($, $el, sel.url));\n\n    // Sin nombre o sin link no sirve: el agente no puede ofrecerlo.\n    if (!name || !productUrl) return;\n\n    // La URL del producto es el id estable dentro de esta fuente.\n    if (vistos.has(productUrl)) return;\n    vistos.add(productUrl);\n\n    const { price, currency } = parsePrice(pick($, $el, sel.price));\n\n    out.push({\n      json: {\n        source_id: src.source_id,\n        external_id: productUrl,\n        name,\n        description: pick($, $el, sel.description),\n        category: pick($, $el, sel.category) ?? cfg.category_default ?? null,\n        price,\n        currency,\n        image_url: toAbsolute(pick($, $el, sel.image)),\n        product_url: productUrl,\n        seller_name: src.name,\n        location: cfg.location ?? 'Ciudad del Este',\n      },\n    });\n  });\n}\n\nreturn out;"
+      },
+      "id": "c3a00000-0000-4000-8000-000000000005",
+      "name": "Parsear HTML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-240, 300],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO products (\n  source_id, source_platform, external_id, name, description, category,\n  price, currency, availability, image_url, product_url, seller_name, location, scraped_at\n)\nVALUES ($1, 'local', $2, $3, $4, $5, $6, $7, true, $8, $9, $10, $11, now())\nON CONFLICT (source_id, external_id) DO UPDATE SET\n  name         = EXCLUDED.name,\n  description  = EXCLUDED.description,\n  category     = EXCLUDED.category,\n  price        = EXCLUDED.price,\n  currency     = EXCLUDED.currency,\n  availability = true,\n  image_url    = EXCLUDED.image_url,\n  product_url  = EXCLUDED.product_url,\n  location     = EXCLUDED.location,\n  scraped_at   = now(),\n  updated_at   = now();",
+        "options": {
+          "queryReplacement": "={{ [$json.source_id, $json.external_id, $json.name, $json.description, $json.category, $json.price, $json.currency, $json.image_url, $json.product_url, $json.seller_name, $json.location] }}"
+        }
+      },
+      "id": "c3a00000-0000-4000-8000-000000000006",
+      "name": "Upsert Products",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [-20, 300],
+      "credentials": {
+        "postgres": { "id": "REEMPLAZAR", "name": "Postgres - geek_zone" }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO scrape_runs (source_id, source_type, status, items_found, items_upserted, error_message, finished_at)\nVALUES ($1, 'local_scrape', $2, $3, $4, $5, now());",
+        "options": {
+          "queryReplacement": "={{ (() => { const found = $('Parsear HTML').all().filter(i => i.json.external_id).length; const fallos = $('Fetch Pagina').all().filter(i => i.json.error).length; const status = fallos === 0 && found > 0 ? 'success' : (found > 0 ? 'partial' : 'error'); return [ $('Cuando el orquestador llama').first().json.source_id, status, found, found, fallos > 0 ? `${fallos} pagina(s) fallaron al descargar` : null ]; })() }}"
+        }
+      },
+      "id": "c3a00000-0000-4000-8000-000000000007",
+      "name": "Log Scrape Run",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [200, 300],
+      "credentials": {
+        "postgres": { "id": "REEMPLAZAR", "name": "Postgres - geek_zone" }
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "r-src",
+              "name": "source_id",
+              "value": "={{ $('Cuando el orquestador llama').first().json.source_id }}",
+              "type": "number"
+            },
+            {
+              "id": "r-name",
+              "name": "source_name",
+              "value": "={{ $('Cuando el orquestador llama').first().json.name }}",
+              "type": "string"
+            },
+            {
+              "id": "r-found",
+              "name": "items_found",
+              "value": "={{ $('Parsear HTML').all().filter(i => i.json.external_id).length }}",
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": false,
+        "options": {}
+      },
+      "id": "c3a00000-0000-4000-8000-000000000008",
+      "name": "Resumen",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [420, 300],
+      "executeOnce": true
+    }
+  ],
+  "connections": {
+    "Cuando el orquestador llama": {
+      "main": [[{ "node": "Armar URLs de Paginas", "type": "main", "index": 0 }]]
+    },
+    "Armar URLs de Paginas": {
+      "main": [[{ "node": "Split Out URLs", "type": "main", "index": 0 }]]
+    },
+    "Split Out URLs": {
+      "main": [[{ "node": "Fetch Pagina", "type": "main", "index": 0 }]]
+    },
+    "Fetch Pagina": {
+      "main": [[{ "node": "Parsear HTML", "type": "main", "index": 0 }]]
+    },
+    "Parsear HTML": {
+      "main": [[{ "node": "Upsert Products", "type": "main", "index": 0 }]]
+    },
+    "Upsert Products": {
+      "main": [[{ "node": "Log Scrape Run", "type": "main", "index": 0 }]]
+    },
+    "Log Scrape Run": {
+      "main": [[{ "node": "Resumen", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "pinData": {},
+  "tags": []
+}

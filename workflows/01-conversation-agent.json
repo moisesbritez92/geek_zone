@@ -1,0 +1,358 @@
+{
+  "name": "01 - Agente de Ventas WhatsApp",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "evolution-inbound",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000001",
+      "name": "Webhook - Evolution Inbound",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-1120, 320],
+      "webhookId": "b1000000-0000-4000-8000-000000000001",
+      "notes": "Evolution API postea acá el evento MESSAGES_UPSERT. Respuesta inmediata (200) para no bloquear a Evolution: la respuesta real al usuario se envía al final con un HTTP Request aparte."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c-evt",
+              "leftValue": "={{ $json.body.event }}",
+              "rightValue": "messages.upsert",
+              "operator": { "type": "string", "operation": "equals" }
+            },
+            {
+              "id": "c-fromme",
+              "leftValue": "={{ $json.body.data.key.fromMe }}",
+              "rightValue": "",
+              "operator": { "type": "boolean", "operation": "false", "singleValue": true }
+            },
+            {
+              "id": "c-group",
+              "leftValue": "={{ $json.body.data.key.remoteJid }}",
+              "rightValue": "@g.us",
+              "operator": { "type": "string", "operation": "notContains" }
+            },
+            {
+              "id": "c-text",
+              "leftValue": "={{ $json.body.data.message.conversation || $json.body.data.message.extendedTextMessage?.text || '' }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "notEmpty", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000002",
+      "name": "Filter - Mensajes Validos",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [-900, 320],
+      "notes": "Descarta: eventos que no son mensajes nuevos, ecos del propio bot (fromMe), grupos (@g.us) y mensajes sin texto (audio/imagen/sticker)."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "s-phone",
+              "name": "phoneNumber",
+              "value": "={{ $json.body.data.key.remoteJid.split('@')[0] }}",
+              "type": "string"
+            },
+            {
+              "id": "s-name",
+              "name": "contactName",
+              "value": "={{ $json.body.data.pushName || '' }}",
+              "type": "string"
+            },
+            {
+              "id": "s-text",
+              "name": "messageText",
+              "value": "={{ $json.body.data.message.conversation || $json.body.data.message.extendedTextMessage?.text }}",
+              "type": "string"
+            },
+            {
+              "id": "s-inst",
+              "name": "instanceName",
+              "value": "={{ $json.body.instance }}",
+              "type": "string"
+            },
+            {
+              "id": "s-msgid",
+              "name": "evolutionMessageId",
+              "value": "={{ $json.body.data.key.id }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": false,
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000003",
+      "name": "Normalizar Payload",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-680, 320],
+      "notes": "Aplana el payload de Evolution API. phoneNumber queda sin el sufijo @s.whatsapp.net y es la session key de la memoria del agente."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO conversations (phone_number, contact_name, last_message_at)\nVALUES ($1, $2, now())\nON CONFLICT (phone_number) DO UPDATE\n  SET last_message_at = now(),\n      contact_name    = COALESCE(NULLIF(EXCLUDED.contact_name, ''), conversations.contact_name)\nRETURNING id AS conversation_id;",
+        "options": {
+          "queryReplacement": "={{ [$json.phoneNumber, $json.contactName] }}"
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000004",
+      "name": "Upsert Conversation",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [-460, 320],
+      "credentials": {
+        "postgres": { "id": "REEMPLAZAR", "name": "Postgres - geek_zone" }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO messages (conversation_id, phone_number, direction, message_type, content, evolution_message_id)\nVALUES ($1, $2, 'inbound', 'text', $3, $4);",
+        "options": {
+          "queryReplacement": "={{ [$json.conversation_id, $('Normalizar Payload').item.json.phoneNumber, $('Normalizar Payload').item.json.messageText, $('Normalizar Payload').item.json.evolutionMessageId] }}"
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000005",
+      "name": "Log Inbound Message",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [-240, 320],
+      "credentials": {
+        "postgres": { "id": "REEMPLAZAR", "name": "Postgres - geek_zone" }
+      },
+      "alwaysOutputData": true,
+      "notes": "Log de negocio, separado de n8n_chat_histories (que es el formato interno de LangChain)."
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $('Normalizar Payload').item.json.messageText }}",
+        "options": {
+          "systemMessage": "Sos un vendedor de Geek Zone, una tienda de Ciudad del Este, Paraguay. Hablás por WhatsApp con clientes reales.\n\nESTILO\n- Español rioplatense/paraguayo, informal pero profesional. Tuteo o voseo, nunca \"usted\".\n- Mensajes CORTOS: es WhatsApp, no un email. Máximo 4 o 5 líneas por respuesta.\n- Nada de markdown ni negritas: WhatsApp no las renderiza bien. Usá saltos de línea y, como mucho, guiones para listar.\n- Emojis con moderación (uno o dos por mensaje, no más).\n\nCATÁLOGO — REGLA CRÍTICA\n- NUNCA inventes productos, precios, stock ni disponibilidad. Absolutamente todo lo que digas sobre el catálogo tiene que venir de la tool search_products.\n- Antes de afirmar que algo está disponible o cuánto sale, llamá a search_products. Si no llamaste a la tool, no tenés el dato.\n- Si search_products no devuelve nada, decilo con honestidad y ofrecé buscar algo parecido o avisarle cuando entre stock. No improvises un sustituto que no viste en los resultados.\n- Al mostrar productos: nombre, precio con moneda y el link. Máximo 3 o 4 opciones por mensaje para no abrumar.\n- Los precios en PYG se escriben en guaraníes (ej: Gs. 1.250.000). Los precios en USD con el símbolo (ej: USD 180).\n- Usá get_product_details cuando el cliente pregunte específicamente por un producto que ya le mostraste y necesites la ficha completa.\n\nCIERRE DE VENTA — REGLA CRÍTICA\n- Llamá a register_purchase_alert SOLO cuando el cliente confirme EXPLÍCITAMENTE que quiere comprar (\"lo llevo\", \"dale, lo quiero\", \"cerramos\", \"mandame los datos para pagar\").\n- Interés, consultas de precio, \"lo voy a pensar\" o \"me gusta\" NO son confirmación. No dispares la alerta ahí.\n- Después de registrar la alerta, avisale al cliente que un asesor lo contacta en breve para coordinar pago y entrega. No inventes formas de pago, plazos de envío ni direcciones: eso lo maneja el asesor humano.\n\nLÍMITES\n- No prometas descuentos, cuotas ni promociones que no estén en los datos del producto.\n- Si te preguntan algo fuera del catálogo o de la venta (soporte técnico, reclamos, garantía), derivá a un asesor humano.\n- Si el cliente escribe en portugués, respondé en portugués (llega mucho cliente brasileño a Ciudad del Este)."
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000006",
+      "name": "Sales Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2,
+      "position": [0, 320],
+      "notes": "El agente decide por sí mismo cuándo buscar en el catálogo y cuándo registrar una compra. No hay detección de intención por nodos."
+    },
+    {
+      "parameters": {
+        "modelName": "models/gemini-flash-lite-latest",
+        "options": { "temperature": 0.4 }
+      },
+      "id": "a1000000-0000-4000-8000-000000000007",
+      "name": "Gemini Flash Lite",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [-120, 560],
+      "credentials": {
+        "googlePalmApi": { "id": "REEMPLAZAR", "name": "Google Gemini API" }
+      },
+      "notes": "Verificar el identificador de modelo vigente en Google AI Studio antes de activar. El desplegable del nodo lista los disponibles para la API key."
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $('Normalizar Payload').item.json.phoneNumber }}",
+        "tableName": "n8n_chat_histories",
+        "contextWindowLength": 20
+      },
+      "id": "a1000000-0000-4000-8000-000000000008",
+      "name": "Postgres Chat Memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryPostgresChat",
+      "typeVersion": 1.3,
+      "position": [40, 560],
+      "credentials": {
+        "postgres": { "id": "REEMPLAZAR", "name": "Postgres - geek_zone" }
+      },
+      "notes": "Memoria por número de teléfono: cada cliente tiene su propio hilo."
+    },
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Busca productos en el catálogo de la tienda. Usala SIEMPRE antes de hablar de precios, stock o disponibilidad. Todos los parámetros son opcionales: dejá vacío el que no aplique. Devuelve hasta 15 productos disponibles ordenados por precio.",
+        "operation": "executeQuery",
+        "query": "SELECT id, name, description, category, price, currency, availability, product_url, image_url, seller_name, location\nFROM products\nWHERE availability = true\n  AND ($1::text IS NULL OR name ILIKE '%' || $1 || '%' OR description ILIKE '%' || $1 || '%')\n  AND ($2::text IS NULL OR category ILIKE '%' || $2 || '%')\n  AND ($3::numeric IS NULL OR price >= $3)\n  AND ($4::numeric IS NULL OR price <= $4)\nORDER BY price ASC\nLIMIT 15;",
+        "options": {
+          "queryReplacement": "={{ [ $fromAI('search_text', 'Palabras clave de lo que busca el cliente, ej: notebook gamer, iphone 15, auriculares bluetooth. Vacío si el cliente no especificó producto.', 'string') || null, $fromAI('category', 'Categoría del producto si el cliente la mencionó, ej: celulares, informatica. Vacío si no aplica.', 'string') || null, $fromAI('min_price', 'Precio mínimo si el cliente indicó un piso de presupuesto. Vacío si no aplica.', 'number') || null, $fromAI('max_price', 'Precio máximo si el cliente indicó un tope de presupuesto. Vacío si no aplica.', 'number') || null ] }}"
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000009",
+      "name": "search_products",
+      "type": "n8n-nodes-base.postgresTool",
+      "typeVersion": 2.5,
+      "position": [200, 560],
+      "credentials": {
+        "postgres": { "id": "REEMPLAZAR", "name": "Postgres - geek_zone" }
+      },
+      "notes": "SQL fija con parámetros: el modelo solo controla los VALORES, nunca el texto del SQL. Evita inyección y table scans."
+    },
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Devuelve la ficha completa de UN producto a partir de su id numérico. Usala cuando el cliente pregunta por un producto puntual que ya apareció en una búsqueda previa y necesitás el detalle (descripción larga, stock, vendedor).",
+        "operation": "executeQuery",
+        "query": "SELECT id, name, description, category, subcategory, price, currency, availability,\n       stock_quantity, product_url, image_url, seller_name, location, scraped_at\nFROM products\nWHERE id = $1;",
+        "options": {
+          "queryReplacement": "={{ [ $fromAI('product_id', 'El id numérico del producto, tal como vino en los resultados de search_products.', 'number') ] }}"
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000010",
+      "name": "get_product_details",
+      "type": "n8n-nodes-base.postgresTool",
+      "typeVersion": 2.5,
+      "position": [360, 560],
+      "credentials": {
+        "postgres": { "id": "REEMPLAZAR", "name": "Postgres - geek_zone" }
+      }
+    },
+    {
+      "parameters": {
+        "description": "Registra una compra confirmada y avisa al vendedor humano. Llamala SOLO cuando el cliente confirmó explícitamente que quiere comprar. No la uses ante simple interés o consultas de precio.",
+        "workflowId": {
+          "__rl": true,
+          "value": "REEMPLAZAR_ID_DEL_WORKFLOW_04",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "phone_number": "={{ $('Normalizar Payload').item.json.phoneNumber }}",
+            "conversation_id": "={{ $('Upsert Conversation').item.json.conversation_id }}",
+            "customer_name": "={{ $fromAI('customer_name', 'Nombre del cliente si lo dijo en la conversación. Vacío si no lo sabés.', 'string') }}",
+            "product_id": "={{ $fromAI('product_id', 'El id numérico del producto que compra, tal como vino de search_products. Vacío si el cliente no eligió un producto concreto del catálogo.', 'number') }}",
+            "product_name": "={{ $fromAI('product_name', 'Nombre del producto que el cliente confirmó comprar.', 'string') }}",
+            "product_price": "={{ $fromAI('product_price', 'Precio del producto según el catálogo.', 'number') }}",
+            "currency": "={{ $fromAI('currency', 'Moneda del precio: PYG o USD.', 'string') }}",
+            "notes": "={{ $fromAI('notes', 'Detalles útiles para el vendedor: cantidad, color, forma de pago que mencionó, zona de entrega, urgencia.', 'string') }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            { "id": "phone_number", "displayName": "phone_number", "type": "string", "required": false, "defaultMatch": false, "canBeUsedToMatch": true, "removed": false },
+            { "id": "conversation_id", "displayName": "conversation_id", "type": "string", "required": false, "defaultMatch": false, "canBeUsedToMatch": true, "removed": false },
+            { "id": "customer_name", "displayName": "customer_name", "type": "string", "required": false, "defaultMatch": false, "canBeUsedToMatch": true, "removed": false },
+            { "id": "product_id", "displayName": "product_id", "type": "number", "required": false, "defaultMatch": false, "canBeUsedToMatch": true, "removed": false },
+            { "id": "product_name", "displayName": "product_name", "type": "string", "required": false, "defaultMatch": false, "canBeUsedToMatch": true, "removed": false },
+            { "id": "product_price", "displayName": "product_price", "type": "number", "required": false, "defaultMatch": false, "canBeUsedToMatch": true, "removed": false },
+            { "id": "currency", "displayName": "currency", "type": "string", "required": false, "defaultMatch": false, "canBeUsedToMatch": true, "removed": false },
+            { "id": "notes", "displayName": "notes", "type": "string", "required": false, "defaultMatch": false, "canBeUsedToMatch": true, "removed": false }
+          ],
+          "attemptToConvertTypes": true,
+          "convertFieldsToString": false
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000011",
+      "name": "register_purchase_alert",
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [520, 560],
+      "notes": "IMPORTANTE: phone_number y conversation_id NO los genera el modelo, salen por expresión del contexto real de la conversación. Si los generara el LLM podría notificar la compra con un número equivocado. Tras importar hay que re-seleccionar el workflow 04 (el ID cambia al importar)."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO messages (conversation_id, phone_number, direction, message_type, content)\nVALUES ($1, $2, 'outbound', 'text', $3);",
+        "options": {
+          "queryReplacement": "={{ [$('Upsert Conversation').item.json.conversation_id, $('Normalizar Payload').item.json.phoneNumber, $json.output] }}"
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000012",
+      "name": "Log Outbound Message",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [220, 320],
+      "credentials": {
+        "postgres": { "id": "REEMPLAZAR", "name": "Postgres - geek_zone" }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.EVOLUTION_BASE_URL }}/message/sendText/{{ $env.EVOLUTION_INSTANCE_NAME }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ number: $('Normalizar Payload').item.json.phoneNumber, text: $('Sales Agent').item.json.output }) }}",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000013",
+      "name": "Send WhatsApp Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 320],
+      "credentials": {
+        "httpHeaderAuth": { "id": "REEMPLAZAR", "name": "Evolution API - Header Auth" }
+      },
+      "notes": "La credencial Header Auth aporta el header apikey. EVOLUTION_BASE_URL sin barra final."
+    }
+  ],
+  "connections": {
+    "Webhook - Evolution Inbound": {
+      "main": [[{ "node": "Filter - Mensajes Validos", "type": "main", "index": 0 }]]
+    },
+    "Filter - Mensajes Validos": {
+      "main": [[{ "node": "Normalizar Payload", "type": "main", "index": 0 }]]
+    },
+    "Normalizar Payload": {
+      "main": [[{ "node": "Upsert Conversation", "type": "main", "index": 0 }]]
+    },
+    "Upsert Conversation": {
+      "main": [[{ "node": "Log Inbound Message", "type": "main", "index": 0 }]]
+    },
+    "Log Inbound Message": {
+      "main": [[{ "node": "Sales Agent", "type": "main", "index": 0 }]]
+    },
+    "Sales Agent": {
+      "main": [[{ "node": "Log Outbound Message", "type": "main", "index": 0 }]]
+    },
+    "Log Outbound Message": {
+      "main": [[{ "node": "Send WhatsApp Reply", "type": "main", "index": 0 }]]
+    },
+    "Gemini Flash Lite": {
+      "ai_languageModel": [[{ "node": "Sales Agent", "type": "ai_languageModel", "index": 0 }]]
+    },
+    "Postgres Chat Memory": {
+      "ai_memory": [[{ "node": "Sales Agent", "type": "ai_memory", "index": 0 }]]
+    },
+    "search_products": {
+      "ai_tool": [[{ "node": "Sales Agent", "type": "ai_tool", "index": 0 }]]
+    },
+    "get_product_details": {
+      "ai_tool": [[{ "node": "Sales Agent", "type": "ai_tool", "index": 0 }]]
+    },
+    "register_purchase_alert": {
+      "ai_tool": [[{ "node": "Sales Agent", "type": "ai_tool", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "pinData": {},
+  "tags": []
+}

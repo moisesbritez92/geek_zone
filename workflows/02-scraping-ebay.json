@@ -1,0 +1,245 @@
+{
+  "name": "02 - Scraping eBay (API oficial)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "hours", "hoursInterval": 6 }]
+        }
+      },
+      "id": "b2000000-0000-4000-8000-000000000001",
+      "name": "Cada 6 horas",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-1120, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, name, seller_username, config\nFROM sources\nWHERE platform = 'ebay' AND active = true;",
+        "options": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000002",
+      "name": "Get eBay Sources",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [-900, 300],
+      "credentials": {
+        "postgres": { "id": "REEMPLAZAR", "name": "Postgres - geek_zone" }
+      },
+      "notes": "Agregar un vendedor de eBay = insertar una fila en sources. No se toca este workflow."
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000003",
+      "name": "Loop Over Sellers",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [-680, 300],
+      "notes": "Salida 0 = terminó el loop. Salida 1 = siguiente vendedor."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// La Browse API exige al menos uno de: q, category_ids, epid, gtin o charity_ids.\n// El filtro sellers: por sí solo devuelve error 12001, por eso q/category_ids\n// se configuran por vendedor en sources.config.\nconst s = $json;\nconst cfg = s.config ?? {};\n\nconst params = new URLSearchParams();\nif (cfg.q) params.set('q', cfg.q);\nif (cfg.category_ids) params.set('category_ids', String(cfg.category_ids));\nparams.set('filter', `sellers:{${s.seller_username}}`);\nparams.set('limit', String(cfg.limit ?? 200));\n\nreturn {\n  json: {\n    ...s,\n    ebayUrl: `https://api.ebay.com/buy/browse/v1/item_summary/search?${params.toString()}`,\n    marketplaceId: cfg.marketplace_id ?? 'EBAY_US',\n  },\n};"
+      },
+      "id": "b2000000-0000-4000-8000-000000000004",
+      "name": "Armar Request eBay",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-460, 400]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.ebayUrl }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-EBAY-C-MARKETPLACE-ID", "value": "={{ $json.marketplaceId }}" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "onError": "continueRegularOutput",
+        "options": { "timeout": 30000 }
+      },
+      "id": "b2000000-0000-4000-8000-000000000005",
+      "name": "eBay Browse API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-240, 400],
+      "credentials": {
+        "oAuth2Api": { "id": "REEMPLAZAR", "name": "eBay Browse API - OAuth2" }
+      },
+      "notes": "onError=continue: si un vendedor falla, el loop sigue con los demás.\nMVP: solo la primera página (hasta 200 items). TODO v2: seguir el link 'next' de la respuesta para paginar."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c-items",
+              "leftValue": "={{ $json.itemSummaries }}",
+              "rightValue": "",
+              "operator": { "type": "array", "operation": "exists", "singleValue": true }
+            },
+            {
+              "id": "c-notempty",
+              "leftValue": "={{ $json.itemSummaries }}",
+              "rightValue": "",
+              "operator": { "type": "array", "operation": "notEmpty", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000006",
+      "name": "Tiene Resultados?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [-20, 400]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "itemSummaries",
+        "options": {}
+      },
+      "id": "b2000000-0000-4000-8000-000000000007",
+      "name": "Split Out Items",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Mapea la respuesta de la Browse API al esquema de products.\nconst source = $('Loop Over Sellers').first().json;\nconst out = [];\n\nfor (const item of $input.all()) {\n  const s = item.json;\n  const currency = s.price?.currency;\n\n  // El esquema solo acepta PYG y USD. Si el marketplace configurado devuelve\n  // otra moneda, salteamos el item en vez de guardar un precio con moneda falsa.\n  if (currency !== 'USD' && currency !== 'PYG') continue;\n\n  out.push({\n    json: {\n      source_id: source.id,\n      external_id: s.itemId,\n      name: s.title,\n      description: s.shortDescription ?? null,\n      category: s.categories?.[0]?.categoryName ?? null,\n      price: s.price?.value != null ? Number(s.price.value) : null,\n      currency,\n      image_url: s.image?.imageUrl ?? null,\n      product_url: s.itemWebUrl ?? null,\n      seller_name: s.seller?.username ?? source.seller_username,\n      location: s.itemLocation?.country ?? null,\n    },\n  });\n}\n\nreturn out;"
+      },
+      "id": "b2000000-0000-4000-8000-000000000008",
+      "name": "Map a Products",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO products (\n  source_id, source_platform, external_id, name, description, category,\n  price, currency, availability, image_url, product_url, seller_name, location, scraped_at\n)\nVALUES ($1, 'ebay', $2, $3, $4, $5, $6, $7, true, $8, $9, $10, $11, now())\nON CONFLICT (source_id, external_id) DO UPDATE SET\n  name         = EXCLUDED.name,\n  description  = EXCLUDED.description,\n  category     = EXCLUDED.category,\n  price        = EXCLUDED.price,\n  currency     = EXCLUDED.currency,\n  availability = true,\n  image_url    = EXCLUDED.image_url,\n  product_url  = EXCLUDED.product_url,\n  seller_name  = EXCLUDED.seller_name,\n  location     = EXCLUDED.location,\n  scraped_at   = now(),\n  updated_at   = now();",
+        "options": {
+          "queryReplacement": "={{ [$json.source_id, $json.external_id, $json.name, $json.description, $json.category, $json.price, $json.currency, $json.image_url, $json.product_url, $json.seller_name, $json.location] }}"
+        }
+      },
+      "id": "b2000000-0000-4000-8000-000000000009",
+      "name": "Upsert Products",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [640, 300],
+      "credentials": {
+        "postgres": { "id": "REEMPLAZAR", "name": "Postgres - geek_zone" }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO scrape_runs (source_id, source_type, status, items_found, items_upserted, error_message, finished_at)\nVALUES ($1, 'ebay', $2, $3, $4, $5, now());",
+        "options": {
+          "queryReplacement": "={{ [ $('Loop Over Sellers').first().json.id, ($('eBay Browse API').first().json.error ? 'error' : 'success'), ($('eBay Browse API').first().json.total ?? 0), $('Map a Products').all().length, ($('eBay Browse API').first().json.error ? JSON.stringify($('eBay Browse API').first().json.error).slice(0, 500) : null) ] }}"
+        }
+      },
+      "id": "b2000000-0000-4000-8000-000000000010",
+      "name": "Log Scrape Run",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [860, 300],
+      "credentials": {
+        "postgres": { "id": "REEMPLAZAR", "name": "Postgres - geek_zone" }
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "notes": "executeOnce: una fila de auditoría por vendedor, no una por producto."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO scrape_runs (source_id, source_type, status, items_found, items_upserted, error_message, finished_at)\nVALUES ($1, 'ebay', 'error', 0, 0, $2, now());",
+        "options": {
+          "queryReplacement": "={{ [ $('Loop Over Sellers').first().json.id, 'Sin resultados o error de la Browse API: ' + JSON.stringify($json).slice(0, 400) ] }}"
+        }
+      },
+      "id": "b2000000-0000-4000-8000-000000000011",
+      "name": "Log Fuente Sin Resultados",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [200, 500],
+      "credentials": {
+        "postgres": { "id": "REEMPLAZAR", "name": "Postgres - geek_zone" }
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {},
+      "id": "b2000000-0000-4000-8000-000000000012",
+      "name": "Fin",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [-460, 180]
+    }
+  ],
+  "connections": {
+    "Cada 6 horas": {
+      "main": [[{ "node": "Get eBay Sources", "type": "main", "index": 0 }]]
+    },
+    "Get eBay Sources": {
+      "main": [[{ "node": "Loop Over Sellers", "type": "main", "index": 0 }]]
+    },
+    "Loop Over Sellers": {
+      "main": [
+        [{ "node": "Fin", "type": "main", "index": 0 }],
+        [{ "node": "Armar Request eBay", "type": "main", "index": 0 }]
+      ]
+    },
+    "Armar Request eBay": {
+      "main": [[{ "node": "eBay Browse API", "type": "main", "index": 0 }]]
+    },
+    "eBay Browse API": {
+      "main": [[{ "node": "Tiene Resultados?", "type": "main", "index": 0 }]]
+    },
+    "Tiene Resultados?": {
+      "main": [
+        [{ "node": "Split Out Items", "type": "main", "index": 0 }],
+        [{ "node": "Log Fuente Sin Resultados", "type": "main", "index": 0 }]
+      ]
+    },
+    "Split Out Items": {
+      "main": [[{ "node": "Map a Products", "type": "main", "index": 0 }]]
+    },
+    "Map a Products": {
+      "main": [[{ "node": "Upsert Products", "type": "main", "index": 0 }]]
+    },
+    "Upsert Products": {
+      "main": [[{ "node": "Log Scrape Run", "type": "main", "index": 0 }]]
+    },
+    "Log Scrape Run": {
+      "main": [[{ "node": "Loop Over Sellers", "type": "main", "index": 0 }]]
+    },
+    "Log Fuente Sin Resultados": {
+      "main": [[{ "node": "Loop Over Sellers", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "pinData": {},
+  "tags": []
+}
